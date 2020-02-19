@@ -824,7 +824,7 @@ class DedupFS(fuse.Fuse):  # {{{1
                 except OSError as oe:
                     if oe.errno != errno.EEXIST:
                         raise
-                process = Popen(["python3.6", "download_service.py", "upload", digest.encode('hex')], bufsize=-1)
+                process = Popen(["python3", "download_service.py", "upload", digest.encode('hex')], bufsize=-1)
                 with open(FIFO_PIPE, 'wb') as pipe:
                     os.unlink(FIFO_PIPE)
                     pipe.write(self.compress(new_block))
@@ -1176,7 +1176,7 @@ class DedupFS(fuse.Fuse):  # {{{1
 
     def __get_block_from_telegram(self, digest):
         buf = tempfile.NamedTemporaryFile()
-        process = Popen(["python3.6", "download_service.py", "download", str(digest),str(buf.name)],bufsize=-1)
+        process = Popen(["python3", "download_service.py", "download", str(digest),str(buf.name)],bufsize=-1)
         process.wait()
         buf.seek(0)
         block = buf.read()
