@@ -46,6 +46,22 @@ def on_upload_progress(send_bytes, total_bytes):
 
 
 #
+def delete_block(hash_uid):
+    try:
+        hash_uid = str(hash_uid)
+        entity = client.get_entity(client.get_me())
+        messages = client.get_messages(entity, limit=1, search=hash_uid)
+        for i in range(len(messages)):
+            msg = messages[i]
+            if msg.message == hash_uid:
+                client.delete_messages(entity, msg)
+                return 0
+    except Exception as e:
+        return -1
+    finally:
+        client.disconnect()
+
+
 def download_block(hash_uid, filename):
     try:
         hash_uid = str(hash_uid)
@@ -111,7 +127,11 @@ def upload_block(hash_uid):
 def main(argv):
     try:
         service = str(argv[1])
-        if service == 'download':
+        if service == 'delete':
+            uid = str(argv[2])
+            delete_block(hash_uid=uid)
+            return 0
+        elif service == 'download':
             uid = str(argv[2])
             filename = str (argv[3])
             download_block(hash_uid=uid,filename=filename)

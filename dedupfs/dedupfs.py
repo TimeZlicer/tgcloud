@@ -582,6 +582,10 @@ class DedupFS(fuse.Fuse):  # {{{1
             if self.read_only: return -errno.EROFS
             self.__remove(path)
             self.__commit_changes(nested)
+            if (nested):
+                self.__gc_hook()
+            else:
+                self.__collect_garbage()
         except Exception, e:
             self.__rollback_changes(nested)
             if nested: raise
@@ -1152,6 +1156,7 @@ class DedupFS(fuse.Fuse):  # {{{1
         should_reorganize = False
         for row in self.conn.execute('SELECT hash FROM hashes WHERE id NOT IN (SELECT hash_id FROM "index")'):
             # del self.blocks[str(row[0])]
+            self.__delete_from_telegram(str(row[0]))
             should_reorganize = True
         if should_reorganize:
             self.__dbmcall('reorganize')
@@ -1182,6 +1187,10 @@ class DedupFS(fuse.Fuse):  # {{{1
         block = buf.read()
         buf.close()
         return block
+
+    def __delete_from_telegram(self, digest):
+        process = Popen(["python3", "download_service.py", "delete", str(digest)],bufsize=-1)
+        process.wait()
 
     def __get_file_buffer(self, path):  # {{{3
         if path in self.buffers:
