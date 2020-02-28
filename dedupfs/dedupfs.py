@@ -33,7 +33,6 @@ if sys.version_info[:2] != (2, 6):
 # Try to load the required modules from Python's standard library.
 try:
     from io import BytesIO
-    import cStringIO
     import errno
     import hashlib
     import tempfile
@@ -113,8 +112,10 @@ class DedupFS(fuse.Fuse):  # {{{1
             self.multithreaded = 0
 
             # Initialize instance attributes.
-            self.block_size = 1024 * 1024 * 5
+            self.buffer_size = 512 * 1024 * 1024
+            self.block_size = 3000 * 524288
             self.buffers = {}
+            self.buffer_digests = {}
             self.bytes_read = 0
             self.bytes_written = 0
             self.cache_gc_last_run = time.time()
@@ -465,17 +466,17 @@ class DedupFS(fuse.Fuse):  # {{{1
             if path in self.buffers:
                 buf = self.buffers[path]
                 # Flush the write buffer?
-                if buf.dirty:
+                if buf.dirty and self.buffer_digests[path] != buf.digest:
                     # Record start time so we can calculate average write speed.
                     start_time = time.time()
                     # Make sure the file exists and get its inode number.
                     inode = self.__path2keys(path)[1]
                     # Save apparent file size before possibly compressing data.
-                    apparent_size = len(buf)
+                    apparent_size = buf.length
                     # Split up that string in the configured block size, hash the
                     # resulting blocks and store any new blocks.
                     try:
-                        self.__write_blocks(inode, buf, apparent_size)
+                        self.__write_blocks(inode, buf, apparent_size, path)
                         self.__commit_changes()
                     except Exception, e:
                         self.__rollback_changes()
@@ -487,6 +488,7 @@ class DedupFS(fuse.Fuse):  # {{{1
                 # Delete the buffer.
                 buf.close()
                 del self.buffers[path]
+                del self.buffer_digests[path]
             return 0
         except Exception, e:
             return self.__except_to_status('release', e, errno.EIO)
@@ -787,54 +789,64 @@ class DedupFS(fuse.Fuse):  # {{{1
                     module.set_block_size(self.block_size)
         self.compress, self.decompress = self.compressors[selected_format]
 
-    def __write_blocks(self, inode, buf, apparent_size):  # {{{3
+    def __write_blocks(self, inode, buf, apparent_size, path):  # {{{3
         start_time = time.time()
         # Delete existing index entries for file.
         self.conn.execute('DELETE FROM "index" WHERE inode = ?', (inode,))
         # Store any changed blocks and rebuild the file index.
-        storage_size = len(buf)
-        for block_nr in xrange(int(math.ceil(storage_size / float(self.block_size)))):
+        storage_size = buf.length
+        total_blocks = int(math.ceil(storage_size / float(self.block_size)))
+        for block_nr in xrange(total_blocks):
             buf.seek(self.block_size * block_nr, os.SEEK_SET)
-            new_block = buf.read(self.block_size)
-            digest = self.__hash(new_block)
+            if storage_size <= self.block_size:
+                new_block = buf
+            else:
+                new_block = Buffer(self.hash_function_impl)
+                new_block.write(buf.read(self.block_size))
+            digest = new_block.digest
             encoded_digest = digest.encode('hex')  # sqlite3.Binary(digest)
             row = self.conn.execute('SELECT id FROM hashes WHERE hash = ?', (encoded_digest,)).fetchone()
             if row:
                 hash_id = row[0]
-                existing_block = self.decompress(self.__get_block_from_telegram(digest.encode('hex')))
+                # existing_block = self.decompress(self.__get_block_from_telegram(digest.encode('hex')))
                 # Check for hash collisions.
-                if new_block != existing_block:
-                    # Found a hash collision: dump debugging info and exit.
-                    dumpfile_collision = '/tmp/dedupfs-collision-%i' % time.time()
-                    handle = open(dumpfile_collision, 'w')
-                    handle.write('Content of existing block is %r.\n' % existing_block)
-                    handle.write('Content of new block is %r.\n' % new_block)
-                    handle.close()
-                    self.logger.critical(
-                        "Found a hash collision on block number %i of inode %i!\n" + \
-                        "The existing block is %i bytes and hashes to %s.\n" + \
-                        "The new block is %i bytes and hashes to %s.\n" + \
-                        "Saved existing and conflicting data blocks to %r.",
-                        block_nr, inode, len(existing_block), digest,
-                        len(new_block), digest, dumpfile_collision)
-                    os._exit(1)
+                # if new_block != existing_block:
+                #     # Found a hash collision: dump debugging info and exit.
+                #     dumpfile_collision = '/tmp/dedupfs-collision-%i' % time.time()
+                #     handle = open(dumpfile_collision, 'w')
+                #     handle.write('Content of existing block is %r.\n' % existing_block)
+                #     handle.write('Content of new block is %r.\n' % new_block)
+                #     handle.close()
+                #     self.logger.critical(
+                #         "Found a hash collision on block number %i of inode %i!\n" + \
+                #         "The existing block is %i bytes and hashes to %s.\n" + \
+                #         "The new block is %i bytes and hashes to %s.\n" + \
+                #         "Saved existing and conflicting data blocks to %r.",
+                #         block_nr, inode, len(existing_block), digest,
+                #         len(new_block), digest, dumpfile_collision)
+                #     os._exit(1)
                 self.conn.execute('INSERT INTO "index" (inode, hash_id, block_nr) VALUES (?, ?, ?)',
                                   (inode, hash_id, block_nr))
             else:
 
-                FIFO_PIPE = str('upipe_' + digest.encode('hex'))
-                try:
-                    os.mkfifo(FIFO_PIPE)
-                except OSError as oe:
-                    if oe.errno != errno.EEXIST:
-                        raise
-                process = Popen(["python3", "download_service.py", "upload", digest.encode('hex')], bufsize=-1)
-                with open(FIFO_PIPE, 'wb') as pipe:
-                    os.unlink(FIFO_PIPE)
-                    pipe.write(self.compress(new_block))
+                FIFO_PIPE = encoded_digest
+                os.link(new_block.name, FIFO_PIPE)
+                # FIFO_PIPE = str('upipe_' + digest.encode('hex'))
+                # try:
+                #     os.mkfifo(FIFO_PIPE)
+                # except OSError as oe:
+                #     if oe.errno != errno.EEXIST:
+                #         raise
+                full_path = path.split(os.path.sep)
+                caption = '{}\n{}/{}\n{}'.format(encoded_digest, block_nr + 1, total_blocks, full_path[-1]) if storage_size > self.block_size else '{}\n{}'.format(encoded_digest, full_path[-1])
+                process = Popen(["python3", "download_service.py", "upload", encoded_digest, caption], bufsize=-1)
+                # with open(FIFO_PIPE, 'wb') as pipe:
+                    # os.unlink(FIFO_PIPE)
+                    # pipe.write(self.compress(new_block.read()))
                     # if callable(getattr(pipe, 'flush', None)):
                     #     pipe.flush()
                 process.wait()
+                os.remove(FIFO_PIPE)
 
                 # self.blocks[digest] = self.compress(new_block)
                 self.conn.execute('INSERT INTO hashes (id, hash) VALUES (NULL, ?)', (encoded_digest,))
@@ -842,7 +854,6 @@ class DedupFS(fuse.Fuse):  # {{{1
                                   (inode, block_nr))
                 # Check that the data was properly stored in the database?
                 self.__verify_write(new_block, digest, block_nr, inode)
-            block_nr += 1
         # Update file size and last modified time.
         self.conn.execute('UPDATE inodes SET size = ?, mtime = ? WHERE inode = ?',
                           (apparent_size, self.__newctime(), inode))
@@ -1180,7 +1191,7 @@ class DedupFS(fuse.Fuse):  # {{{1
             self.conn.rollback()
 
     def __get_block_from_telegram(self, digest):
-        buf = tempfile.NamedTemporaryFile()
+        buf = Buffer(self.hash_function_impl)
         process = Popen(["python3", "download_service.py", "download", str(digest),str(buf.name)],bufsize=-1)
         process.wait()
         buf.seek(0)
@@ -1196,7 +1207,7 @@ class DedupFS(fuse.Fuse):  # {{{1
         if path in self.buffers:
             return self.buffers[path]
         else:
-            buf = Buffer()
+            buf = Buffer(self.hash_function_impl)
             inode = self.__path2keys(path)[1]
 
             query = """ SELECT h.hash FROM hashes h, "index" i
@@ -1207,6 +1218,7 @@ class DedupFS(fuse.Fuse):  # {{{1
                 # something sensible when self.blocks.has_key(digest) is false.
                 buf.write(self.decompress(self.__get_block_from_telegram(str(row[0]))))
             self.buffers[path] = buf
+            self.buffer_digests[path] = buf.digest
             return buf
 
     def __fetchval(self, query, *values):  # {{{3
@@ -1231,16 +1243,20 @@ class DedupFS(fuse.Fuse):  # {{{1
 class Buffer:  # {{{1
 
     """
-    This class wraps cStringIO.StringIO with two additions: The __len__
-    method and a dirty flag to determine whether a buffer has changed.
+    This class wraps tempfile.NamedTemporaryFile with two additions: The len
+    method, hash method and a dirty flag to determine whether a buffer has changed.
     """
 
-    def __init__(self):
-        self.buf = cStringIO.StringIO()
+    def __init__(self, hash_function_impl):
+        self.buf = tempfile.NamedTemporaryFile(dir=os.getcwd())
         self.dirty = False
+        self.length = 0
+        self.hash_function_impl = hash_function_impl
+        self.context = self.hash_function_impl()
+        self.digest = None
 
     def __getattr__(self, attr, default=None):
-        """ Delegate to the StringIO object. """
+        """ Delegate to the NamedTemporaryFile object. """
         return getattr(self.buf, attr, default)
 
     def __len__(self):
@@ -1251,6 +1267,22 @@ class Buffer:  # {{{1
         self.buf.seek(position, os.SEEK_SET)
         return length
 
+    def hash(self):
+        """ Get the hash of the buffer. """
+        position = self.buf.tell()
+        self.buf.seek(0, os.SEEK_SET)
+
+        context = self.hash_function_impl()
+        data = self.buf.read(524288)
+        context.update(data)
+        while len(data) == 524288:
+            data = self.buf.read(524288)
+            context.update(data)
+        self.digest = context.digest()
+
+        self.buf.seek(position, os.SEEK_SET)
+        return self.digest
+
     def truncate(self, *args):
         """ Truncate the file at the current position and set the dirty flag. """
         if len(self) > self.buf.tell():
@@ -1260,7 +1292,12 @@ class Buffer:  # {{{1
     def write(self, *args):
         """ Write a string to the file and set the dirty flag. """
         self.dirty = True
-        return self.buf.write(*args)
+        result = self.buf.write(*args)
+        self.length += len(args[0])
+        self.context.update(args[0])
+        self.digest = self.context.digest()
+        self.buf.truncate()
+        return result
 
 
 # Named tuples used to return complex objects to FUSE. {{{1

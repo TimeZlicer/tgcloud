@@ -53,7 +53,7 @@ def delete_block(hash_uid):
         messages = client.get_messages(entity, limit=1, search=hash_uid)
         for i in range(len(messages)):
             msg = messages[i]
-            if msg.message == hash_uid:
+            if msg.message.startswith(hash_uid):
                 client.delete_messages(entity, msg)
                 return 0
     except Exception as e:
@@ -71,7 +71,7 @@ def download_block(hash_uid, filename):
         messages = client.get_messages(entity, limit=1, search=hash_uid)
         for i in range(len(messages)):
             msg = messages[i]
-            if msg.message == hash_uid:
+            if msg.message.startswith(hash_uid):
                 # FIFO = f"dpipe_{hash_uid}"
                 # import errno
                 # try:
@@ -90,19 +90,13 @@ def download_block(hash_uid, filename):
         client.disconnect()
 
 
-def upload_block(hash_uid):
+def upload_block(hash_uid, caption):
     try:
         hash_uid = str(hash_uid)
         os.chdir(path_home)
         entity = client.get_entity(client.get_me())
-        FIFO = f"upipe_{hash_uid}"
+        FIFO = hash_uid
 
-        import errno
-        try:
-            os.mkfifo(FIFO)
-        except OSError as oe:
-            if oe.errno != errno.EEXIST:
-                raise
         messages = client.get_messages(entity, limit=1, search=hash_uid)   
         with open(FIFO, 'rb') as bytesin:
             if len(messages):
@@ -111,8 +105,7 @@ def upload_block(hash_uid):
                 return 0
             message = client.send_file(entity,
                                        file=bytesin,
-                                       caption=f'{hash_uid}',
-                                       attributes=[DocumentAttributeFilename(f'{hash_uid}')],
+                                       caption=caption,
                                        allow_cache=False,
                                        part_size_kb=512,
                                        force_document=True,
@@ -138,7 +131,8 @@ def main(argv):
             return 0
         elif service == 'upload':
             uid = str(argv[2])
-            upload_block(hash_uid=uid)
+            caption = str(argv[3])
+            upload_block(hash_uid=uid, caption=caption)
             return 0
 
     except Exception as e:
