@@ -98,7 +98,13 @@ class TelegramClientX(TelegramClient):
                     break
                 self.result = None
                 # time.sleep(random.randrange(20, 100, 1) * 0.001)
-                self.result = self.client.invoke(request)
+                retry = True
+                while retry:
+                    try:
+                        self.result = self.client.invoke(request)
+                        retry = False
+                    except:
+                        time.sleep(random.randrange(20, 100, 1) * 0.001)
                 if self.result is False:
                     break
                 self.q_request.task_done()
