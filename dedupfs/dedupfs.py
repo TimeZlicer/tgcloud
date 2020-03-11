@@ -838,7 +838,15 @@ class DedupFS(fuse.Fuse):  # {{{1
                 #     if oe.errno != errno.EEXIST:
                 #         raise
                 full_path = path.split(os.path.sep)
-                caption = '{}\n{}/{}\n{}'.format(encoded_digest, block_nr + 1, total_blocks, full_path[-1]) if storage_size > self.block_size else '{}\n{}'.format(encoded_digest, full_path[-1])
+                if len(full_path) == 2:
+                    caption = "/"
+                else:
+                    caption = ""
+                    for i in xrange(1, len(full_path)-1):
+                        caption = '{}/{}'.format(caption, full_path[i])
+                if storage_size > self.block_size:
+                    caption = '{}/{}\n{}'.format(block_nr + 1, total_blocks, caption)
+                caption = '{}\n{}\n{}'.format(encoded_digest, caption, full_path[-1])
                 process = Popen(["python3", "download_service.py", "upload", encoded_digest, caption], bufsize=-1)
                 # with open(FIFO_PIPE, 'wb') as pipe:
                     # os.unlink(FIFO_PIPE)
